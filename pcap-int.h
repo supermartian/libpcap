@@ -121,6 +121,13 @@ struct pcap {
 	 */
 	read_op_t read_op;
 
+	pthread_t thread[64]; /* All the threads */
+	int mt; /* The number of threads for fanout. */
+	int mt_current; /* The number of current threads. */
+	int mt_finished; /* The number of finished threads. */
+	pthread_mutex_t f_mutex; /* The mutex for condition variable. */
+	pthread_cond_t got_finished; /* Indicates if all the threads are finished. */
+
 	/*
 	 * Method to call to read to read packets from a savefile.
 	 */
@@ -133,6 +140,7 @@ struct pcap {
 #else
 	int fd;
 	int selectable_fd;
+	int fds[64];
 #endif /* WIN32 */
 
 	/*
@@ -146,6 +154,7 @@ struct pcap {
 	int break_loop;		/* flag set to force break from packet-reading loop */
 
 	void *priv;		/* private data for methods */
+	void *privs[64];		/* private data for mt threads */
 
 	int swapped;
 	FILE *rfile;		/* null if live capture, non-null if savefile */

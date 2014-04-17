@@ -1457,6 +1457,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 {
 	struct pcap_linux	*handlep = handle->priv;
 	u_char			*bp;
+	int current_fd;
 	int			offset;
 #ifdef HAVE_PF_PACKET_SOCKETS
 	struct sockaddr_ll	from;

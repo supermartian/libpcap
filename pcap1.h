@@ -221,10 +221,12 @@ pcap_t	*pcap_open_dead(int, int);
 pcap_t	*pcap_open_offline(const char *, char *);
 void	pcap_close(pcap_t *);
 int	pcap_loop(pcap_t *, int, pcap_handler, u_char *);
+int	pcap_loop_mt(pcap_t *, int, pcap_handler, u_char *);
 int	pcap_dispatch(pcap_t *, int, pcap_handler, u_char *);
 const u_char*
 	pcap_next(pcap_t *, struct pcap_pkthdr *);
 int 	pcap_next_ex(pcap_t *, struct pcap_pkthdr **, const u_char **);
+void	pcap_breakloop_mt(pcap_t *);
 void	pcap_breakloop(pcap_t *);
 int	pcap_stats(pcap_t *, struct pcap_stat *);
 int	pcap_setfilter(pcap_t *, struct bpf_program *);

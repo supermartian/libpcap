@@ -108,6 +108,8 @@
 #include "pcap-dbus.h"
 #endif
 
+#include <pthread.h>
+
 int
 pcap_not_initialized(pcap_t *pcap _U_)
 {
@@ -716,6 +718,55 @@ pcap_get_tstamp_precision(pcap_t *p)
 }
 
 int
+pcap_activate_mt(pcap_t *p, int num)
+{
+	int status;
+	int i;
+	int cpun = sysconf(_SC_NPROCESSORS_ONLN);
+	cpun = cpun < 1 ? 1 : cpun;
+
+	p->mt = num < 1 ? cpun : num; /* By default use the number of cores. */
+	p->mt_current = 0;
+	/*
+	 * Catch attempts to re-activate an already-activated
+	 * pcap_t; this should, for example, catch code that
+	 * calls pcap_open_live() followed by pcap_activate(),
+	 * as some code that showed up in a Stack Exchange
+	 * question did.
+	 */
+	if (pcap_check_activated(p))
+		return (PCAP_ERROR_ACTIVATED);
+
+	for (i = 0; i < num; i++) {
+		p->mt_current = i;
+		status = p->activate_op(p);
+	}
+
+	if (status >= 0)
+		p->activated = 1;
+	else {
+		if (p->errbuf[0] == '\0') {
+			/*
+			 * No error message supplied by the activate routine;
+			 * for the benefit of programs that don't specially
+			 * handle errors other than PCAP_ERROR, return the
+			 * error message corresponding to the status.
+			 */
+			snprintf(p->errbuf, PCAP_ERRBUF_SIZE, "%s",
+			    pcap_statustostr(status));
+		}
+
+		/*
+		 * Undo any operation pointer setting, etc. done by
+		 * the activate operation.
+		 */
+		initialize_ops(p);
+	}
+	return (status);
+
+}
+
+int
 pcap_activate(pcap_t *p)
 {
 	int status;
@@ -879,6 +930,87 @@ pcap_loop(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 			if (cnt <= 0)
 				return (0);
 		}
+	}
+}
+
+struct mt_arg {
+	pcap_t *p;
+	int *cnt; /* Shared counter */
+	pcap_handler callback;
+	u_char *user;
+};
+
+static void *
+pcap_loop_mt_thread(void *args)
+{
+	pcap_t *p = ((struct mt_arg *) args)->p;
+	int *cnt = ((struct mt_arg *) args)->cnt;
+	pcap_handler callback = ((struct mt_arg *) args)->callback;
+	u_char *user = ((struct mt_arg *) args)->user;
+	int n = 0;
+	int finished;
+
+	for (;;) {
+		if (p->rfile == NULL) {
+			do {
+				n = p->read_op(p, *cnt, callback, user); /* In Linux cnt is not used */
+			} while (n == 0);
+		}
+		if (!PACKET_COUNT_IS_UNLIMITED(*cnt)) {
+			if(__sync_sub_and_fetch(cnt, n) <= 0)
+				return;
+		}
+	}
+
+	finished = __sync_fetch_and_add(&(p->mt_finished), 1);
+	if (finished == p->mt) {
+		pthread_cond_signal(&(p->got_finished));
+	}
+}
+
+int
+pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
+{
+	int i = 0;
+	cpu_set_t cpusets[64];
+	int cpun = sysconf(_SC_NPROCESSORS_ONLN);
+
+	struct mt_arg args; /* This is shared between threads. */
+	args.p = p;
+	args.cnt = &cnt;
+	args.callback = callback;
+	args.user = user;
+
+	p->mt_finished = 0;
+
+	pthread_mutex_init(&(p->f_mutex), NULL);
+	pthread_cond_init(&(p->got_finished), NULL);
+	for (i = 0; i < p->mt; i++) {
+		pthread_create(&(p->thread[i]), NULL, pcap_loop_mt_thread, (void *) (&args));
+		/* Pins the threads to one core. */
+		CPU_ZERO(&cpusets[i]);
+		CPU_SET(i % cpun, &cpusets[i]);
+		pthread_setaffinity_np(p->thread[i], sizeof(cpu_set_t), &cpusets[i]);
+	}
+
+	pthread_mutex_lock(&(p->f_mutex));
+	pthread_cond_wait(&(p->got_finished), &(p->f_mutex));
+
+	pthread_cond_destroy(&(p->got_finished));
+	pthread_mutex_destory(&(p->f_mutex));
+
+	return (0);
+}
+
+/*
+ * Force the threads in pcap_loop_mt to terminate.
+ */
+void
+pcap_breakloop_mt(pcap_t *p)
+{
+	int i;
+	for (i = 0; i < p->mt; i++) {
+		pthread_cancel(p->thread[i]);
 	}
 }
 
