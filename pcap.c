@@ -753,6 +753,16 @@ pcap_activate(pcap_t *p)
 	return (status);
 }
 
+int
+pcap_set_fanout(pcap_t *p, int fanout_id, int fanout_type)
+{
+	if (pcap_check_activated(p))
+		return (PCAP_ERROR_ACTIVATED);
+	p->fanout_id = fanout_id;
+	p->fanout_type = fanout_type;
+	return (0);
+}
+
 pcap_t *
 pcap_open_live(const char *source, int snaplen, int promisc, int to_ms, char *errbuf)
 {
@@ -763,6 +773,9 @@ pcap_open_live(const char *source, int snaplen, int promisc, int to_ms, char *er
 	if (p == NULL)
 		return (NULL);
 	status = pcap_set_snaplen(p, snaplen);
+	if (status < 0)
+		goto fail;
+	status = pcap_set_fanout(p, DEFAULT_FANOUT_ID, DEFAULT_FANOUT_TYPE);
 	if (status < 0)
 		goto fail;
 	status = pcap_set_promisc(p, promisc);

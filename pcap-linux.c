@@ -306,6 +306,11 @@ struct pcap_linux {
 #endif
 };
 
+/* PACKET_FANOUT options */
+#define PACKET_FANOUT			18
+#define PACKET_FANOUT_HASH		0
+#define PACKET_FANOUT_LB		1
+
 /*
  * Stuff to do when we close.
  */
@@ -1699,6 +1704,8 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 		caplen = handle->snapshot;
 
 	/* Run the packet filter if not using kernel filter */
+	/* Now force the things happen in userland - Yuzhong Wen */
+    handlep->filter_in_userland = 1;
 	if (handlep->filter_in_userland && handle->fcode.bf_insns) {
 		if (bpf_filter(handle->fcode.bf_insns, bp,
 		                packet_len, caplen) == 0)
@@ -3422,6 +3429,7 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 {
 	struct pcap_linux *handlep = handle->priv;
 	int val = version;
+	int fanout_arg;
 	socklen_t len = sizeof(val);
 
 	/* Probe whether kernel supports the specified TPACKET version */
@@ -3457,6 +3465,18 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 			"can't set up reserve on packet socket: %s",
 			pcap_strerror(errno));
 		return -1;
+	}
+
+	/* Packet fanout options */
+	fanout_arg = (handle->fanout_id |
+			(handle->fanout_type << 16));
+	if (setsockopt(handle->fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg,
+				sizeof(fanout_arg)) < 0) {
+		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+			"can't set up fanout on packet socket: %s",
+			pcap_strerror(errno));
+		return -1;
+
 	}
 
 	return 0;

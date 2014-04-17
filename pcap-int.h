@@ -212,6 +212,8 @@ struct pcap {
 	 */
 	pcap_handler oneshot_callback;
 
+	int fanout_id;
+	int fanout_type;
 #ifdef WIN32
 	/*
 	 * These are, at least currently, specific to the Win32 NPF
@@ -224,6 +226,9 @@ struct pcap {
 #endif
 	cleanup_op_t cleanup_op;
 };
+
+#define DEFAULT_FANOUT_ID	18
+#define DEFAULT_FANOUT_TYPE	1
 
 /*
  * This is a timeval as stored in a savefile.
