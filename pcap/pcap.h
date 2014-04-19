@@ -370,6 +370,7 @@ pcap_t	*pcap_fopen_offline(FILE *, char *);
 
 void	pcap_close(pcap_t *);
 int	pcap_loop(pcap_t *, int, pcap_handler, u_char *);
+int	pcap_loop_mt(pcap_t *, int, pcap_handler, u_char *);
 int	pcap_dispatch(pcap_t *, int, pcap_handler, u_char *);
 const u_char*
 	pcap_next(pcap_t *, struct pcap_pkthdr *);

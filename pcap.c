@@ -718,58 +718,18 @@ pcap_get_tstamp_precision(pcap_t *p)
 }
 
 int
-pcap_activate_mt(pcap_t *p, int num)
-{
-	int status;
-	int i;
-	int cpun = sysconf(_SC_NPROCESSORS_ONLN);
-	cpun = cpun < 1 ? 1 : cpun;
-
-	p->mt = num < 1 ? cpun : num; /* By default use the number of cores. */
-	p->mt_current = 0;
-	/*
-	 * Catch attempts to re-activate an already-activated
-	 * pcap_t; this should, for example, catch code that
-	 * calls pcap_open_live() followed by pcap_activate(),
-	 * as some code that showed up in a Stack Exchange
-	 * question did.
-	 */
-	if (pcap_check_activated(p))
-		return (PCAP_ERROR_ACTIVATED);
-
-	for (i = 0; i < num; i++) {
-		p->mt_current = i;
-		status = p->activate_op(p);
-	}
-
-	if (status >= 0)
-		p->activated = 1;
-	else {
-		if (p->errbuf[0] == '\0') {
-			/*
-			 * No error message supplied by the activate routine;
-			 * for the benefit of programs that don't specially
-			 * handle errors other than PCAP_ERROR, return the
-			 * error message corresponding to the status.
-			 */
-			snprintf(p->errbuf, PCAP_ERRBUF_SIZE, "%s",
-			    pcap_statustostr(status));
-		}
-
-		/*
-		 * Undo any operation pointer setting, etc. done by
-		 * the activate operation.
-		 */
-		initialize_ops(p);
-	}
-	return (status);
-
-}
-
-int
 pcap_activate(pcap_t *p)
 {
 	int status;
+	int cpun = sysconf(_SC_NPROCESSORS_ONLN);
+	int mt = 0;
+	cpun = cpun < 1 ? 1 : cpun;
+
+	/* By default use the number of cores.
+	 * XXX
+	 * Ummm... it's better for letting the user define it.
+	 * */
+	p->mt = p->mt < 1 ? cpun : p->mt;
 
 	/*
 	 * Catch attempts to re-activate an already-activated
@@ -780,6 +740,7 @@ pcap_activate(pcap_t *p)
 	 */
 	if (pcap_check_activated(p))
 		return (PCAP_ERROR_ACTIVATED);
+
 	status = p->activate_op(p);
 	if (status >= 0)
 		p->activated = 1;
@@ -948,8 +909,12 @@ pcap_loop_mt_thread(void *args)
 	pcap_handler callback = ((struct mt_arg *) args)->callback;
 	u_char *user = ((struct mt_arg *) args)->user;
 	int n = 0;
+	int index;
 	int finished;
 
+	index = __sync_fetch_and_add(&(p->mt_current), 1);
+	p->fdmap[pthread_getthreadid_np()] = index;
+	p->buffermap[pthread_getthreadid_np()] = index;
 	for (;;) {
 		if (p->rfile == NULL) {
 			do {
@@ -963,6 +928,7 @@ pcap_loop_mt_thread(void *args)
 	}
 
 	finished = __sync_fetch_and_add(&(p->mt_finished), 1);
+	/* At this point all the threads are finished, notify the main thread to quit. */
 	if (finished == p->mt) {
 		pthread_cond_signal(&(p->got_finished));
 	}
@@ -987,12 +953,13 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	pthread_cond_init(&(p->got_finished), NULL);
 	for (i = 0; i < p->mt; i++) {
 		pthread_create(&(p->thread[i]), NULL, pcap_loop_mt_thread, (void *) (&args));
-		/* Pins the threads to one core. */
+		/* Pins the threads to one specified core. */
 		CPU_ZERO(&cpusets[i]);
 		CPU_SET(i % cpun, &cpusets[i]);
 		pthread_setaffinity_np(p->thread[i], sizeof(cpu_set_t), &cpusets[i]);
 	}
 
+	/* Now stop here and wait for all the threads finish their jobs. */
 	pthread_mutex_lock(&(p->f_mutex));
 	pthread_cond_wait(&(p->got_finished), &(p->f_mutex));
 
@@ -1008,6 +975,7 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 void
 pcap_breakloop_mt(pcap_t *p)
 {
+	p->break_loop = 1;
 	int i;
 	for (i = 0; i < p->mt; i++) {
 		pthread_cancel(p->thread[i]);

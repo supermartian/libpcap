@@ -94,6 +94,7 @@ struct pcap_opt {
 };
 
 typedef int	(*activate_op_t)(pcap_t *);
+typedef int	(*activate_mt_op_t)(pcap_t *);
 typedef int	(*can_set_rfmon_op_t)(pcap_t *);
 typedef int	(*read_op_t)(pcap_t *, int cnt, pcap_handler, u_char *);
 typedef int	(*inject_op_t)(pcap_t *, const void *, size_t);
@@ -141,6 +142,7 @@ struct pcap {
 	int fd;
 	int selectable_fd;
 	int fds[64];
+	int fdmap[64];
 #endif /* WIN32 */
 
 	/*
@@ -148,13 +150,15 @@ struct pcap {
 	 */
 	int bufsize;
 	u_char *buffer;
+	u_char *buffer_mt[64];
 	u_char *bp;
 	int cc;
+	int cc_mt[64];
+	int buffermap[64];
 
 	int break_loop;		/* flag set to force break from packet-reading loop */
 
 	void *priv;		/* private data for methods */
-	void *privs[64];		/* private data for mt threads */
 
 	int swapped;
 	FILE *rfile;		/* null if live capture, non-null if savefile */
@@ -175,6 +179,7 @@ struct pcap {
 	int linktype_ext;       /* Extended information stored in the linktype field of a file */
 	int tzoff;		/* timezone offset */
 	int offset;		/* offset for proper alignment */
+	int offset_mt[64];		/* offset for proper alignment */
 	int activated;		/* true if the capture is really started */
 	int oldstyle;		/* if we're opening with pcap_open_live() */
 
