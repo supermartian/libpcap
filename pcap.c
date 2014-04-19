@@ -31,6 +31,7 @@
  * SUCH DAMAGE.
  */
 
+#define _GNU_SOURCE
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -109,6 +110,7 @@
 #endif
 
 #include <pthread.h>
+#include <sched.h>
 
 int
 pcap_not_initialized(pcap_t *pcap _U_)
@@ -913,8 +915,8 @@ pcap_loop_mt_thread(void *args)
 	int finished;
 
 	index = __sync_fetch_and_add(&(p->mt_current), 1);
-	p->fdmap[pthread_getthreadid_np()] = index;
-	p->buffermap[pthread_getthreadid_np()] = index;
+	p->fdmap[pthread_self()] = index;
+	p->buffermap[pthread_self()] = index;
 	for (;;) {
 		if (p->rfile == NULL) {
 			do {
@@ -964,7 +966,7 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	pthread_cond_wait(&(p->got_finished), &(p->f_mutex));
 
 	pthread_cond_destroy(&(p->got_finished));
-	pthread_mutex_destory(&(p->f_mutex));
+	pthread_mutex_destroy(&(p->f_mutex));
 
 	return (0);
 }

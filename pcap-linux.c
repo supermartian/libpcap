@@ -137,6 +137,7 @@
 #include <net/if_arp.h>
 #include <poll.h>
 #include <dirent.h>
+#include <pthread.h>
 
 #include "pcap-int.h"
 #include "pcap/sll.h"
@@ -1502,7 +1503,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 #endif
 
 	
-	tid = pthread_getthreadid_np();
+	tid = pthread_self();
 	if (handle->mt > 1) {
 		current_fd = handle->fds[handle->fdmap[tid]];
 	} else {
@@ -4533,7 +4534,7 @@ static int
 pcap_read_linux_mmap_v3_mt(pcap_t *handle, int max_packets, pcap_handler callback,
 		u_char *user)
 {
-	int tid = pthread_getthreadid_np();
+	int tid = pthread_self();
 	int k = handle->buffermap[handle->fds[handle->fdmap[tid]]];
 
 	return pcap_read_linux_mmap_v3_internal(handle, max_packets, callback,
