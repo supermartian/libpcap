@@ -751,7 +751,6 @@ pcap_activate(pcap_t *p)
 		return (PCAP_ERROR_ACTIVATED);
 
 	status = p->activate_op(p);
-	printf("activate\n");
 	if (status >= 0)
 		p->activated = 1;
 	else {
@@ -966,9 +965,7 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	pthread_cond_init(&(p->got_finished), NULL);
 	for (i = 0; i < p->mt; i++) {
 		pthread_attr_init(&attr);
-		printf("%d lolffffffffffff %d\n", p->mt, i);
 		pthread_create(&(p->thread[i]), &attr, pcap_loop_mt_thread, (void *) (&args));
-		perror("jdf");
 		/* Pins the threads to one specified core. */
 	}
 
@@ -979,7 +976,6 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	pthread_cond_destroy(&(p->got_finished));
 	pthread_mutex_destroy(&(p->f_mutex));
 
-	printf("lol\n");
 	return (0);
 }
 

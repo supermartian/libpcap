@@ -1507,7 +1507,6 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
     pthread_t current = pthread_self();
     tid = GET_TID(current, 0x3f);
 	int k = handle->sockfd2index[handle->tid2sockfd[tid]];
-	printf("reading k %d\n", k);
 	if (handle->mt > 1) {
 		current_fd = handle->fds[k];
 	} else {
@@ -1567,7 +1566,6 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 			(struct sockaddr *) &from, &fromlen);
 #endif /* defined(HAVE_PACKET_AUXDATA) && defined(HAVE_LINUX_TPACKET_AUXDATA_TP_VLAN_TCI) */
 	} while (packet_len == -1 && errno == EINTR);
-	printf("packet_len %d\n", packet_len);
 
 	/* Check if an error occured */
 
@@ -1801,7 +1799,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 	 * we can get kernel statistics - once here, and once in
 	 * pcap_stats_linux().
 	 */
-	handlep->packets_read++;
+	__sync_fetch_and_add(&(handlep->packets_read), 1);
 
 	/* Call the user supplied callback function */
 	callback(userdata, &pcap_header, bp);
@@ -1906,6 +1904,7 @@ pcap_stats_linux(pcap_t *handle, struct pcap_stat *stats)
 	 * Try to get the packet counts from the kernel.
 	 */
 	for (i = 0; i < handle->mt; i++) {
+		memset(&kstats, 0, len);
 		if (getsockopt(handle->fds[i], SOL_PACKET, PACKET_STATISTICS,
 				&kstats, &len) > -1) {
 			/*
@@ -1958,7 +1957,6 @@ pcap_stats_linux(pcap_t *handle, struct pcap_stat *stats)
 			handlep->stat.ps_recv += kstats.tp_packets;
 			handlep->stat.ps_drop += kstats.tp_drops;
 			*stats = handlep->stat;
-			return 0;
 		}
 		else
 		{
@@ -1976,6 +1974,7 @@ pcap_stats_linux(pcap_t *handle, struct pcap_stat *stats)
 			}
 		}
 	}
+	return 0;
 #endif
 	/*
 	 * On systems where the PACKET_STATISTICS "getsockopt()" argument
@@ -3059,10 +3058,8 @@ activate_new(pcap_t *handle)
 			}
 		}
 
-		printf("now fd %d for %d\n", sock_fd, i);
 		handle->fds[i] = sock_fd;
 		handle->sockfd2index[sock_fd] = i;
-		printf("handle %d, %d\n", handle->fds[0], handle->fds[i]);
 	}
 
 	/* It seems the kernel supports the new interface. */
@@ -3241,7 +3238,6 @@ activate_new(pcap_t *handle)
 			int fanout_arg;
 			fanout_arg = (handle->fanout_id |
 			(handle->fanout_type << 16));
-			printf("set fanout for, %d %d %d\n",i, handle->fds[i], handle->mt);
 			if (setsockopt(handle->fds[i], SOL_PACKET, PACKET_FANOUT, &fanout_arg,
 					sizeof(fanout_arg)) < 0) {
 				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
@@ -3468,16 +3464,13 @@ activate_mmap(pcap_t *handle, int *status)
 	switch (handlep->tp_version) {
 	case TPACKET_V1:
 		handle->read_op = pcap_read_linux_mmap_v1;
-		printf("opv1\n");
 		break;
 #ifdef HAVE_TPACKET2
 	case TPACKET_V2:
 		if (handle->mt > 1) {
 			handle->read_op = pcap_read_linux_mmap_v2_mt;
-		printf("opv2r\n");
 		} else {
 			handle->read_op = pcap_read_linux_mmap_v2;
-		printf("opv22\n");
 		}
 		break;
 #endif
@@ -3485,10 +3478,8 @@ activate_mmap(pcap_t *handle, int *status)
 	case TPACKET_V3:
 		if (handle->mt > 1) {
 			handle->read_op = pcap_read_linux_mmap_v3_mt;
-		printf("opv3r\n");
 		} else {
 			handle->read_op = pcap_read_linux_mmap_v3;
-		printf("opv33\n");
 		}
 		break;
 #endif
@@ -3527,7 +3518,6 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 	int sockfd;
 
 	/* Probe whether kernel supports the specified TPACKET version */
-	printf("set fanout\n");
  
    
 
@@ -3535,12 +3525,10 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 		int val = version;
 		socklen_t len = sizeof(val);
 		sockfd = handle->fds[i];
-		printf("hehe for %d\n", sockfd);
 		if (getsockopt(sockfd, SOL_PACKET, PACKET_HDRLEN, &val, &len) < 0) {
 				perror("yo");
 			if (errno == ENOPROTOOPT || errno == EINVAL)
 			{
-				printf("no tpv3\n");
 				perror("yo");
 				continue;	/* no */
 			}
@@ -3564,7 +3552,6 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 			return -1;
 		}
 		handlep->tp_version = version;
-        printf("tpversion:%d\n", version);
     
 		/* Reserve space for VLAN tag reconstruction */
 		val = VLAN_TAG_LEN;
@@ -3959,7 +3946,6 @@ retry:
 			/*
 			 * We don't have ring buffer support in this kernel.
 			 */
-			printf("noooooooooooooo\n");
 			return 0;
 		}
 		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
@@ -4156,7 +4142,6 @@ static int pcap_wait_for_frames_mmap(pcap_t *handle)
 
 static int pcap_wait_for_frames_mmap_mt(pcap_t *handle, int k)
 {
-	printf("reading k and error coming%d\n", k);
 	if (!pcap_get_ring_frame(handle, TP_STATUS_USER, k)) {
 		struct pcap_linux *handlep = handle->priv;
 		int timeout;
@@ -4294,7 +4279,6 @@ static int pcap_handle_packet_mmap(
 		return -1;
 	}
 
-	printf("lalalala %d\n", k);
 	/* run filter on received packet
 	 * If the kernel filtering is enabled we need to run the
 	 * filter until all the frames present into the ring
@@ -4614,7 +4598,6 @@ pcap_read_linux_mmap_v3_internal(pcap_t *handle, int max_packets, pcap_handler c
 			return ret;
 		}
 	}
-	printf("error coming\n");
 	h.raw = pcap_get_ring_frame(handle, TP_STATUS_USER, k);
 	if (!h.raw)
 		return pkts;
@@ -4636,7 +4619,6 @@ pcap_read_linux_mmap_v3_internal(pcap_t *handle, int max_packets, pcap_handler c
 			packets_to_read = max_packets;
 		}
 
-		printf("which k %d\n", k);
 		while(packets_to_read--) {
 			struct tpacket3_hdr* tp3_hdr = (struct tpacket3_hdr*) handlep->current_packet[k];
 			ret = pcap_handle_packet_mmap(
@@ -4747,7 +4729,6 @@ pcap_setfilter_linux_mmap(pcap_t *handle, struct bpf_program *filter)
 		for (n=0; n < handle->cc_mt[k]; ++n) {
 			if (--(handle->offset_mt[k]) < 0)
 				handle->offset_mt[k] = handle->cc_mt[k] - 1;
-		printf("yaya reading k and error coming%d\n", k);
 			if (!pcap_get_ring_frame(handle, TP_STATUS_KERNEL, k))
 				break;
 		}
@@ -6162,7 +6143,6 @@ set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode, int k)
 	 * the filtering done in userland even if it could have been
 	 * done in the kernel.
 	 */
-	printf("now setting %d\n", handle->fds[k]);
 	if (setsockopt(handle->fds[k], SOL_SOCKET, SO_ATTACH_FILTER,
 		       &total_fcode, sizeof(total_fcode)) == 0) {
 		char drain[1];
