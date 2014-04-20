@@ -3213,20 +3213,22 @@ activate_new(pcap_t *handle)
 				handle->linktype = DLT_LINUX_SLL;
 		}
 
-		handlep->ifindex = iface_get_id(handle->fds[0], device,
-		    handle->errbuf);
-		if (handlep->ifindex == -1) {
-			close_all_fds(handle);
-			return PCAP_ERROR;
-		}
-
-		if ((err = iface_bind(handle->fds[0], handlep->ifindex,
-		    handle->errbuf)) != 1) {
+		for (i = 0; i < handle->mt; i++) {
+			handlep->ifindex = iface_get_id(handle->fds[i], device,
+			    handle->errbuf);
+			if (handlep->ifindex == -1) {
 				close_all_fds(handle);
-			if (err < 0)
-				return err;
-			else
-				return 0;	/* try old mechanism */
+				return PCAP_ERROR;
+			}
+            
+			if ((err = iface_bind(handle->fds[i], handlep->ifindex,
+			    handle->errbuf)) != 1) {
+					close_all_fds(handle);
+				if (err < 0)
+					return err;
+				else
+					return 0;	/* try old mechanism */
+			}
 		}
 	} else {
 		/*
@@ -3281,12 +3283,14 @@ activate_new(pcap_t *handle)
 		memset(&mr, 0, sizeof(mr));
 		mr.mr_ifindex = handlep->ifindex;
 		mr.mr_type    = PACKET_MR_PROMISC;
-		if (setsockopt(sock_fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP,
-		    &mr, sizeof(mr)) == -1) {
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-				"setsockopt: %s", pcap_strerror(errno));
-			close_all_fds(handle);
-			return PCAP_ERROR;
+		for (i = 0; i < handle->mt; i++) {
+			if (setsockopt(handle->fds[i], SOL_PACKET, PACKET_ADD_MEMBERSHIP,
+			    &mr, sizeof(mr)) == -1) {
+				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+					"setsockopt: %s", pcap_strerror(errno));
+				close_all_fds(handle);
+				return PCAP_ERROR;
+			}
 		}
 	}
 
@@ -3353,7 +3357,7 @@ activate_new(pcap_t *handle)
 		int nsec_tstamps = 1;
 
 		for (i = 0; i < handle->mt; i++) {
-			if (setsockopt(handle->fd, SOL_SOCKET, SO_TIMESTAMPNS, &nsec_tstamps, sizeof(nsec_tstamps)) < 0) {
+			if (setsockopt(handle->fds[i], SOL_SOCKET, SO_TIMESTAMPNS, &nsec_tstamps, sizeof(nsec_tstamps)) < 0) {
 				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, "setsockopt: unable to set SO_TIMESTAMPNS");
 				return PCAP_ERROR;
 			}
@@ -4282,6 +4286,7 @@ static int pcap_handle_packet_mmap(
 		return -1;
 	}
 
+	printf("lalalala %d\n", k);
 	/* run filter on received packet
 	 * If the kernel filtering is enabled we need to run the
 	 * filter until all the frames present into the ring
@@ -4320,7 +4325,7 @@ static int pcap_handle_packet_mmap(
 		 */
 		bp -= SLL_HDR_LEN;
 
-		/*/*
+		/*
 		 * Let's make sure that's past the end of
 		 * the tpacket header, i.e. >=
 		 * ((u_char *)thdr + TPACKET_HDRLEN), so we
