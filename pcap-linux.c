@@ -1506,8 +1506,9 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 	
     pthread_t current = pthread_self();
     tid = GET_TID(current, 0x3f);
+	int k = handle->sockfd2index[handle->tid2sockfd[tid]];
 	if (handle->mt > 1) {
-		current_fd = handle->fds[handle->fdmap[tid]];
+		current_fd = handle->fds[k];
 	} else {
 		current_fd = handle->fds[0];
 	}
@@ -1526,7 +1527,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 	 * if we're using a memory-mapped buffer, we won't even
 	 * get notified of "network down" events.
 	 */
-	bp = handle->buffer_mt[handle->tidmap[tid]] + handle->offset;
+	bp = handle->buffer_mt[k] + handle->offset;
 
 #if defined(HAVE_PACKET_AUXDATA) && defined(HAVE_LINUX_TPACKET_AUXDATA_TP_VLAN_TCI)
 	msg.msg_name		= &from;
@@ -3058,6 +3059,7 @@ activate_new(pcap_t *handle)
 
 		printf("now fd %d for %d\n", sock_fd, i);
 		handle->fds[i] = sock_fd;
+		handle->sockfd2index[sock_fd] = i;
 		printf("handle %d, %d\n", handle->fds[0], handle->fds[i]);
 	}
 
@@ -3228,6 +3230,18 @@ activate_new(pcap_t *handle)
 					return err;
 				else
 					return 0;	/* try old mechanism */
+			}
+
+			/* Packet fanout options */
+			int fanout_arg;
+			fanout_arg = (handle->fanout_id |
+			(handle->fanout_type << 16));
+			printf("set fanout for, %d %d %d\n",i, handle->fds[i], handle->mt);
+			if (setsockopt(handle->fds[i], SOL_PACKET, PACKET_FANOUT, &fanout_arg,
+					sizeof(fanout_arg)) < 0) {
+				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+				"can't set up fanout on packet socket: %s",
+				pcap_strerror(errno));
 			}
 		}
 	} else {
@@ -3480,7 +3494,7 @@ activate_mmap(pcap_t *handle, int *status)
 	handle->setnonblock_op = pcap_setnonblock_mmap;
 	handle->getnonblock_op = pcap_getnonblock_mmap;
 	handle->oneshot_callback = pcap_oneshot_mmap;
-	handle->selectable_fd = handle->fd;
+	handle->selectable_fd = handle->fds[0];
 	return 1;
 }
 #else /* HAVE_PACKET_RING */
@@ -3505,26 +3519,26 @@ static int
 init_tpacket(pcap_t *handle, int version, const char *version_str)
 {
 	struct pcap_linux *handlep = handle->priv;
-	int val = version;
-	int fanout_arg;
 	int i;
 	int sockfd;
-	socklen_t len = sizeof(val);
-
-	/* Packet fanout options */
-	fanout_arg = (handle->fanout_id |
-			(handle->fanout_type << 16));
 
 	/* Probe whether kernel supports the specified TPACKET version */
 	printf("set fanout\n");
-    
+ 
+   
+
 	for (i = 0; i < handle->mt; i++) {
+		int val = version;
+		socklen_t len = sizeof(val);
 		sockfd = handle->fds[i];
+		printf("hehe for %d\n", sockfd);
 		if (getsockopt(sockfd, SOL_PACKET, PACKET_HDRLEN, &val, &len) < 0) {
+				perror("yo");
 			if (errno == ENOPROTOOPT || errno == EINVAL)
 			{
 				printf("no tpv3\n");
-				return 1;	/* no */
+				perror("yo");
+				continue;	/* no */
 			}
     
 			/* Failed to even find out; this is a fatal error. */
@@ -3558,19 +3572,6 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 			return -1;
 		}
 	}
-
-	for (i = 0; i < handle->mt; i++) {
-		printf("set fanout for, %d %d %d\n",i, handle->fds[i], handle->mt);
-		if (setsockopt(sockfd, SOL_PACKET, PACKET_FANOUT, &fanout_arg,
-					sizeof(fanout_arg)) < 0) {
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-				"can't set up fanout on packet socket: %s",
-				pcap_strerror(errno));
-            return -1;
-		}
-	}
-
-
 	return 0;
 }
 #endif /* defined HAVE_TPACKET2 || defined HAVE_TPACKET3 */
@@ -3954,6 +3955,7 @@ retry:
 			/*
 			 * We don't have ring buffer support in this kernel.
 			 */
+			printf("noooooooooooooo\n");
 			return 0;
 		}
 		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
@@ -4478,8 +4480,7 @@ pcap_read_linux_mmap_v2_mt(pcap_t *handle, int max_packets, pcap_handler callbac
 	pthread_t current = pthread_self();
 	int tid = GET_TID(current, 0x3f);
 
-	int k = handle->tidmap[tid];
-
+	int k = handle->sockfd2index[handle->tid2sockfd[tid]];
 	return pcap_read_linux_mmap_v2_internal(handle, max_packets, callback, user, k);
 }
 static int
@@ -4583,11 +4584,10 @@ static int
 pcap_read_linux_mmap_v3_mt(pcap_t *handle, int max_packets, pcap_handler callback,
 		u_char *user)
 {
-    pthread_t current = pthread_self();
-    int tid = GET_TID(current, 0x3f);
+	pthread_t current = pthread_self();
+	int tid = GET_TID(current, 0x3f);
 
-	int k = handle->tidmap[tid];
-    printf("kkk %d\n", k);
+	int k = handle->sockfd2index[handle->tid2sockfd[tid]];
 
 	return pcap_read_linux_mmap_v3_internal(handle, max_packets, callback,
 			user, k);
@@ -4734,10 +4734,10 @@ pcap_setfilter_linux_mmap(pcap_t *handle, struct bpf_program *filter)
 			continue;
 
 		offset = handle->offset_mt[k];
-		if (--handle->offset_mt[k] < 0)
+		if (--(handle->offset_mt[k]) < 0)
 			handle->offset_mt[k] = handle->cc_mt[k] - 1;
 		for (n=0; n < handle->cc_mt[k]; ++n) {
-			if (--handle->offset_mt[k] < 0)
+			if (--(handle->offset_mt[k]) < 0)
 				handle->offset_mt[k] = handle->cc_mt[k] - 1;
 			if (!pcap_get_ring_frame(handle, TP_STATUS_KERNEL, k))
 				break;

@@ -925,12 +925,12 @@ pcap_loop_mt_thread(void *args)
 	int tid = GET_TID(current, 0x3f);
 
 	index = __sync_fetch_and_add(&(p->mt_current), 1);
-	p->tidmap[tid] = index;
+	p->tid2sockfd[tid] = p->fds[index];
 	for (;;) {
 		if (p->rfile == NULL) {
 			do {
 				n = p->read_op(p, *cnt, callback, user); /* In Linux cnt is not used */
-			} while (n == 0);
+			} while (n >= 0);
 		}
 		if (!PACKET_COUNT_IS_UNLIMITED(*cnt)) {
 			if(__sync_sub_and_fetch(cnt, n) <= 0)

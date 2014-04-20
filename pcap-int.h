@@ -154,8 +154,8 @@ struct pcap {
 	u_char *bp;
 	int cc;
 	int cc_mt[64];
-    int tidmap[64];
-	int buffermap[64];
+	int tid2sockfd[64];
+	int sockfd2index[64];
 
 	int break_loop;		/* flag set to force break from packet-reading loop */
 
