@@ -82,6 +82,7 @@ extern CRITICAL_SECTION g_PcapCompileCriticalSection;
 
 #endif /* _MSC_VER */
 
+#define GET_TID(tid, max) ((tid << 10) ^ (tid >> 10)) & max 
 struct pcap_opt {
 	char	*source;
 	int	timeout;	/* timeout for buffering */
@@ -94,7 +95,6 @@ struct pcap_opt {
 };
 
 typedef int	(*activate_op_t)(pcap_t *);
-typedef int	(*activate_mt_op_t)(pcap_t *);
 typedef int	(*can_set_rfmon_op_t)(pcap_t *);
 typedef int	(*read_op_t)(pcap_t *, int cnt, pcap_handler, u_char *);
 typedef int	(*inject_op_t)(pcap_t *, const void *, size_t);
@@ -154,6 +154,7 @@ struct pcap {
 	u_char *bp;
 	int cc;
 	int cc_mt[64];
+    int tidmap[64];
 	int buffermap[64];
 
 	int break_loop;		/* flag set to force break from packet-reading loop */

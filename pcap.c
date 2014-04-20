@@ -110,6 +110,7 @@
 #endif
 
 #include <pthread.h>
+#include <sys/types.h>
 #include <sched.h>
 
 int
@@ -719,6 +720,12 @@ pcap_get_tstamp_precision(pcap_t *p)
         return (p->opt.tstamp_precision);
 }
 
+void
+pcap_set_mt(pcap_t *p, int n)
+{
+	p->mt = n;
+}
+
 int
 pcap_activate(pcap_t *p)
 {
@@ -744,6 +751,7 @@ pcap_activate(pcap_t *p)
 		return (PCAP_ERROR_ACTIVATED);
 
 	status = p->activate_op(p);
+	printf("activate\n");
 	if (status >= 0)
 		p->activated = 1;
 	else {
@@ -913,10 +921,11 @@ pcap_loop_mt_thread(void *args)
 	int n = 0;
 	int index;
 	int finished;
+	pthread_t current = pthread_self();
+	int tid = GET_TID(current, 0x3f);
 
 	index = __sync_fetch_and_add(&(p->mt_current), 1);
-	p->fdmap[pthread_self()] = index;
-	p->buffermap[pthread_self()] = index;
+	p->tidmap[tid] = index;
 	for (;;) {
 		if (p->rfile == NULL) {
 			do {
@@ -942,6 +951,7 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	int i = 0;
 	cpu_set_t cpusets[64];
 	int cpun = sysconf(_SC_NPROCESSORS_ONLN);
+	pthread_attr_t attr;
 
 	struct mt_arg args; /* This is shared between threads. */
 	args.p = p;
@@ -954,11 +964,11 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	pthread_mutex_init(&(p->f_mutex), NULL);
 	pthread_cond_init(&(p->got_finished), NULL);
 	for (i = 0; i < p->mt; i++) {
-		pthread_create(&(p->thread[i]), NULL, pcap_loop_mt_thread, (void *) (&args));
+		pthread_attr_init(&attr);
+		printf("%d lolffffffffffff %d\n", p->mt, i);
+		pthread_create(&(p->thread[i]), &attr, pcap_loop_mt_thread, (void *) (&args));
+		perror("jdf");
 		/* Pins the threads to one specified core. */
-		CPU_ZERO(&cpusets[i]);
-		CPU_SET(i % cpun, &cpusets[i]);
-		pthread_setaffinity_np(p->thread[i], sizeof(cpu_set_t), &cpusets[i]);
 	}
 
 	/* Now stop here and wait for all the threads finish their jobs. */
@@ -968,6 +978,7 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	pthread_cond_destroy(&(p->got_finished));
 	pthread_mutex_destroy(&(p->f_mutex));
 
+	printf("lol\n");
 	return (0);
 }
 
@@ -979,6 +990,7 @@ pcap_breakloop_mt(pcap_t *p)
 {
 	p->break_loop = 1;
 	int i;
+	pthread_cond_signal(&(p->got_finished));
 	for (i = 0; i < p->mt; i++) {
 		pthread_cancel(p->thread[i]);
 	}
@@ -1867,6 +1879,7 @@ pcap_remove_from_pcaps_to_close(pcap_t *p)
 void
 pcap_cleanup_live_common(pcap_t *p)
 {
+    int i;
 	if (p->buffer != NULL) {
 		free(p->buffer);
 		p->buffer = NULL;
@@ -1889,8 +1902,10 @@ pcap_cleanup_live_common(pcap_t *p)
 	pcap_freecode(&p->fcode);
 #if !defined(WIN32) && !defined(MSDOS)
 	if (p->fd >= 0) {
-		close(p->fd);
-		p->fd = -1;
+		for (i = 0; i < p->mt; i++) {
+			close(p->fds[i]);
+			p->fd = -1;
+		}
 	}
 	p->selectable_fd = -1;
 #endif

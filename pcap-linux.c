@@ -358,11 +358,12 @@ union thdr {
 #define RING_GET_FRAME_MT(h, n) (((union thdr **)(h->buffer_mt[n]))[h->offset])
 
 static void destroy_ring(pcap_t *handle);
-static int create_ring(pcap_t *handle, int *status);
+static int create_ring(pcap_t *handle, int *status, int k);
 static int prepare_tpacket_socket(pcap_t *handle);
 static void pcap_cleanup_linux_mmap(pcap_t *);
 static int pcap_read_linux_mmap_v1(pcap_t *, int, pcap_handler , u_char *);
 #ifdef HAVE_TPACKET2
+static int pcap_read_linux_mmap_v2_mt(pcap_t *, int, pcap_handler , u_char *);
 static int pcap_read_linux_mmap_v2(pcap_t *, int, pcap_handler , u_char *);
 #endif
 #ifdef HAVE_TPACKET3
@@ -399,8 +400,8 @@ static int 	iface_bind_old(int fd, const char *device, char *ebuf);
 static int	fix_program(pcap_t *handle, struct sock_fprog *fcode,
     int is_mapped);
 static int	fix_offset(struct bpf_insn *p);
-static int	set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode);
-static int	reset_kernel_filter(pcap_t *handle);
+static int	set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode, int k);
+static int	reset_kernel_filter(pcap_t *handle, int k);
 
 static struct sock_filter	total_insn
 	= BPF_STMT(BPF_RET | BPF_K, 0);
@@ -1503,7 +1504,8 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 #endif
 
 	
-	tid = pthread_self();
+    pthread_t current = pthread_self();
+    tid = GET_TID(current, 0x3f);
 	if (handle->mt > 1) {
 		current_fd = handle->fds[handle->fdmap[tid]];
 	} else {
@@ -1524,7 +1526,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 	 * if we're using a memory-mapped buffer, we won't even
 	 * get notified of "network down" events.
 	 */
-	bp = handle->buffer_mt[handle->buffermap[tid]] + handle->offset;
+	bp = handle->buffer_mt[handle->tidmap[tid]] + handle->offset;
 
 #if defined(HAVE_PACKET_AUXDATA) && defined(HAVE_LINUX_TPACKET_AUXDATA_TP_VLAN_TCI)
 	msg.msg_name		= &from;
@@ -2451,40 +2453,42 @@ pcap_setfilter_linux_common(pcap_t *handle, struct bpf_program *filter,
 	 *	is buggy and needs to understand that it's just
 	 *	padding.
 	 */
-	if (can_filter_in_kernel) {
-		if ((err = set_kernel_filter(handle, &fcode)) == 0)
-		{
-			/*
-			 * Installation succeded - using kernel filter,
-			 * so userland filtering not needed.
-			 */
-			handlep->filter_in_userland = 0;
-		}
-		else if (err == -1)	/* Non-fatal error */
-		{
-			/*
-			 * Print a warning if we weren't able to install
-			 * the filter for a reason other than "this kernel
-			 * isn't configured to support socket filters.
-			 */
-			if (errno != ENOPROTOOPT && errno != EOPNOTSUPP) {
-				fprintf(stderr,
-				    "Warning: Kernel filter failed: %s\n",
-					pcap_strerror(errno));
+	for (k = 0; k < handle->mt; k++) {
+		if (can_filter_in_kernel) {
+			if ((err = set_kernel_filter(handle, &fcode, k)) == 0)
+			{
+				/*
+				 * Installation succeded - using kernel filter,
+				 * so userland filtering not needed.
+				 */
+				handlep->filter_in_userland = 0;
+			}
+			else if (err == -1)	/* Non-fatal error */
+			{
+				/*
+				 * Print a warning if we weren't able to install
+				 * the filter for a reason other than "this kernel
+				 * isn't configured to support socket filters.
+				 */
+				if (errno != ENOPROTOOPT && errno != EOPNOTSUPP) {
+					fprintf(stderr,
+					    "Warning: Kernel filter failed: %s\n",
+						pcap_strerror(errno));
+				}
 			}
 		}
-	}
-
-	/*
-	 * If we're not using the kernel filter, get rid of any kernel
-	 * filter that might've been there before, e.g. because the
-	 * previous filter could work in the kernel, or because some other
-	 * code attached a filter to the socket by some means other than
-	 * calling "pcap_setfilter()".  Otherwise, the kernel filter may
-	 * filter out packets that would pass the new userland filter.
-	 */
-	if (handlep->filter_in_userland)
-		reset_kernel_filter(handle);
+    
+		/*
+		 * If we're not using the kernel filter, get rid of any kernel
+		 * filter that might've been there before, e.g. because the
+		 * previous filter could work in the kernel, or because some other
+		 * code attached a filter to the socket by some means other than
+		 * calling "pcap_setfilter()".  Otherwise, the kernel filter may
+		 * filter out packets that would pass the new userland filter.
+		 */
+		if (handlep->filter_in_userland)
+			reset_kernel_filter(handle, k);
+		}
 
 	/*
 	 * Free up the copy of the filter that was made by "fix_program()".
@@ -3052,7 +3056,9 @@ activate_new(pcap_t *handle)
 			}
 		}
 
+		printf("now fd %d for %d\n", sock_fd, i);
 		handle->fds[i] = sock_fd;
+		printf("handle %d, %d\n", handle->fds[0], handle->fds[i]);
 	}
 
 	/* It seems the kernel supports the new interface. */
@@ -3150,6 +3156,7 @@ activate_new(pcap_t *handle)
 			for (i = 0; i < handle->mt; i++) { 
 				sock_fd = socket(PF_PACKET, SOCK_DGRAM,
 				    htons(ETH_P_ALL));
+				handle->fds[i] = sock_fd;
 				if (sock_fd == -1) {
 					snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 					    "socket: %s", pcap_strerror(errno));
@@ -3166,7 +3173,6 @@ activate_new(pcap_t *handle)
 						return PCAP_ERROR;
 					}
 				}
-				handle->fds[i] = sock_fd;
 			}
 			handlep->cooked = 1;
 
@@ -3296,6 +3302,7 @@ activate_new(pcap_t *handle)
 			close_all_fds(handle);
 			return PCAP_ERROR;
 		}
+		handle->offset_mt[i] += VLAN_TAG_LEN;
 	}
 	handle->offset += VLAN_TAG_LEN;
 #endif /* HAVE_PACKET_AUXDATA */
@@ -3381,6 +3388,7 @@ activate_mmap(pcap_t *handle, int *status)
 {
 	struct pcap_linux *handlep = handle->priv;
 	int ret;
+	int k;
 
 	/*
 	 * Attempt to allocate a buffer to hold the contents of one
@@ -3405,22 +3413,24 @@ activate_mmap(pcap_t *handle, int *status)
 		*status = PCAP_ERROR;
 		return ret;
 	}
-	ret = create_ring(handle, status);
-	if (ret == 0) {
-		/*
-		 * We don't support memory-mapped capture; our caller
-		 * will fall back on reading from the socket.
-		 */
-		free(handlep->oneshot_buffer);
-		return 0;
-	}
-	if (ret == -1) {
-		/*
-		 * Error attempting to enable memory-mapped capture;
-		 * fail.  create_ring() has set *status.
-		 */
-		free(handlep->oneshot_buffer);
-		return -1;
+	for (k = 0; k < handle->mt; k++) { 
+		ret = create_ring(handle, status, k);
+		if (ret == 0) {
+			/*
+			 * We don't support memory-mapped capture; our caller
+			 * will fall back on reading from the socket.
+			 */
+			free(handlep->oneshot_buffer);
+			return 0;
+		}
+		if (ret == -1) {
+			/*
+			 * Error attempting to enable memory-mapped capture;
+			 * fail.  create_ring() has set *status.
+			 */
+			free(handlep->oneshot_buffer);
+			return -1;
+		}
 	}
 
 	/*
@@ -3436,18 +3446,27 @@ activate_mmap(pcap_t *handle, int *status)
 	switch (handlep->tp_version) {
 	case TPACKET_V1:
 		handle->read_op = pcap_read_linux_mmap_v1;
+		printf("opv1\n");
 		break;
 #ifdef HAVE_TPACKET2
 	case TPACKET_V2:
-		handle->read_op = pcap_read_linux_mmap_v2;
+		if (handle->mt > 1) {
+			handle->read_op = pcap_read_linux_mmap_v2_mt;
+		printf("opv2r\n");
+		} else {
+			handle->read_op = pcap_read_linux_mmap_v2;
+		printf("opv22\n");
+		}
 		break;
 #endif
 #ifdef HAVE_TPACKET3
 	case TPACKET_V3:
 		if (handle->mt > 1) {
 			handle->read_op = pcap_read_linux_mmap_v3_mt;
+		printf("opv3r\n");
 		} else {
 			handle->read_op = pcap_read_linux_mmap_v3;
+		printf("opv33\n");
 		}
 		break;
 #endif
@@ -3485,6 +3504,7 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 	int val = version;
 	int fanout_arg;
 	int i;
+	int sockfd;
 	socklen_t len = sizeof(val);
 
 	/* Packet fanout options */
@@ -3492,10 +3512,16 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 			(handle->fanout_type << 16));
 
 	/* Probe whether kernel supports the specified TPACKET version */
+	printf("set fanout\n");
+    
 	for (i = 0; i < handle->mt; i++) {
-		if (getsockopt(handle->fds[i], SOL_PACKET, PACKET_HDRLEN, &val, &len) < 0) {
+		sockfd = handle->fds[i];
+		if (getsockopt(sockfd, SOL_PACKET, PACKET_HDRLEN, &val, &len) < 0) {
 			if (errno == ENOPROTOOPT || errno == EINVAL)
+			{
+				printf("no tpv3\n");
 				return 1;	/* no */
+			}
     
 			/* Failed to even find out; this is a fatal error. */
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
@@ -3507,7 +3533,7 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 		handlep->tp_hdrlen = val;
     
 		val = version;
-		if (setsockopt(handle->fds[i], SOL_PACKET, PACKET_VERSION, &val,
+		if (setsockopt(sockfd, SOL_PACKET, PACKET_VERSION, &val,
 				   sizeof(val)) < 0) {
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 				"can't activate %s on packet socket: %s",
@@ -3516,25 +3542,30 @@ init_tpacket(pcap_t *handle, int version, const char *version_str)
 			return -1;
 		}
 		handlep->tp_version = version;
+        printf("tpversion:%d\n", version);
     
 		/* Reserve space for VLAN tag reconstruction */
 		val = VLAN_TAG_LEN;
-		if (setsockopt(handle->fds[i], SOL_PACKET, PACKET_RESERVE, &val,
+		if (setsockopt(sockfd, SOL_PACKET, PACKET_RESERVE, &val,
 				   sizeof(val)) < 0) {
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 				"can't set up reserve on packet socket: %s",
 				pcap_strerror(errno));
 			return -1;
 		}
-    
-		if (setsockopt(handle->fds[i], SOL_PACKET, PACKET_FANOUT, &fanout_arg,
+	}
+
+	for (i = 0; i < handle->mt; i++) {
+		printf("set fanout for, %d %d %d\n",i, handle->fds[i], handle->mt);
+		if (setsockopt(sockfd, SOL_PACKET, PACKET_FANOUT, &fanout_arg,
 					sizeof(fanout_arg)) < 0) {
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 				"can't set up fanout on packet socket: %s",
 				pcap_strerror(errno));
-			return -1;
+            return -1;
 		}
 	}
+
 
 	return 0;
 }
@@ -3609,11 +3640,10 @@ prepare_tpacket_socket(pcap_t *handle)
  * if that is PCAP_ERROR, sets handle->errbuf to the appropriate message.
  */
 static int
-create_ring(pcap_t *handle, int *status)
+create_ring(pcap_t *handle, int *status, int k)
 {
 	struct pcap_linux *handlep = handle->priv;
 	unsigned i, j, frames_per_block;
-	int k;
 #ifdef HAVE_TPACKET3
 	/*
 	 * For sockets using TPACKET_V1 or TPACKET_V2, the extra
@@ -3680,7 +3710,7 @@ create_ring(pcap_t *handle, int *status)
 				return -1;
 			}
 			if (!offload) {
-				mtu = iface_get_mtu(handle->fd, handle->opt.source,
+				mtu = iface_get_mtu(handle->fds[k], handle->opt.source,
 				    handle->errbuf);
 				if (mtu == -1) {
 					*status = PCAP_ERROR;
@@ -3695,7 +3725,7 @@ create_ring(pcap_t *handle, int *status)
 		 * in linux-2.6/net/packet/af_packet.c
 		 */
 		len = sizeof(sk_type);
-		if (getsockopt(handle->fd, SOL_SOCKET, SO_TYPE, &sk_type,
+		if (getsockopt(handle->fds[k], SOL_SOCKET, SO_TYPE, &sk_type,
 		    &len) < 0) {
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 			    "getsockopt: %s", pcap_strerror(errno));
@@ -3704,7 +3734,7 @@ create_ring(pcap_t *handle, int *status)
 		}
 #ifdef PACKET_RESERVE
 		len = sizeof(tp_reserve);
-		if (getsockopt(handle->fd, SOL_PACKET, PACKET_RESERVE,
+		if (getsockopt(handle->fds[k], SOL_PACKET, PACKET_RESERVE,
 		    &tp_reserve, &len) < 0) {
 			if (errno != ENOPROTOOPT) {
 				/*
@@ -3818,67 +3848,65 @@ create_ring(pcap_t *handle, int *status)
 		strcpy(ifr.ifr_name, handle->opt.source);
 		ifr.ifr_data = (void *)&hwconfig;
 
-		for (k = 0; k < handle->mt; k++) {
-			if (ioctl(handle->fds[k], SIOCSHWTSTAMP, &ifr) < 0) {
-				switch (errno) {
-            
-				case EPERM:
-					/*
-					 * Treat this as an error, as the
-					 * user should try to run this
-					 * with the appropriate privileges -
-					 * and, if they can't, shouldn't
-					 * try requesting hardware time stamps.
-					 */
-					*status = PCAP_ERROR_PERM_DENIED;
-					return -1;
-            
-				case EOPNOTSUPP:
-					/*
-					 * Treat this as a warning, as the
-					 * only way to fix the warning is to
-					 * get an adapter that supports hardware
-					 * time stamps.  We'll just fall back
-					 * on the standard host time stamps.
-					 */
-					*status = PCAP_WARNING_TSTAMP_TYPE_NOTSUP;
-					break;
-            
-				default:
-					snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-						"SIOCSHWTSTAMP failed: %s",
-						pcap_strerror(errno));
-					*status = PCAP_ERROR;
-					return -1;
-				}
+		if (ioctl(handle->fds[k], SIOCSHWTSTAMP, &ifr) < 0) {
+			switch (errno) {
+        
+			case EPERM:
+				/*
+				 * Treat this as an error, as the
+				 * user should try to run this
+				 * with the appropriate privileges -
+				 * and, if they can't, shouldn't
+				 * try requesting hardware time stamps.
+				 */
+				*status = PCAP_ERROR_PERM_DENIED;
+				return -1;
+        
+			case EOPNOTSUPP:
+				/*
+				 * Treat this as a warning, as the
+				 * only way to fix the warning is to
+				 * get an adapter that supports hardware
+				 * time stamps.  We'll just fall back
+				 * on the standard host time stamps.
+				 */
+				*status = PCAP_WARNING_TSTAMP_TYPE_NOTSUP;
+				break;
+        
+			default:
+				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+					"SIOCSHWTSTAMP failed: %s",
+					pcap_strerror(errno));
+				*status = PCAP_ERROR;
+				return -1;
+			}
+		} else {
+			/*
+			 * Well, that worked.  Now specify the type of
+			 * hardware time stamp we want for this
+			 * socket.
+			 */
+			if (handle->opt.tstamp_type == PCAP_TSTAMP_ADAPTER) {
+				/*
+				 * Hardware timestamp, synchronized
+				 * with the system clock.
+				 */
+				timesource = SOF_TIMESTAMPING_SYS_HARDWARE;
 			} else {
 				/*
-				 * Well, that worked.  Now specify the type of
-				 * hardware time stamp we want for this
-				 * socket.
+				 * PCAP_TSTAMP_ADAPTER_UNSYNCED - hardware
+				 * timestamp, not synchronized with the
+				 * system clock.
 				 */
-				if (handle->opt.tstamp_type == PCAP_TSTAMP_ADAPTER) {
-					/*
-					 * Hardware timestamp, synchronized
-					 * with the system clock.
-					 */
-					timesource = SOF_TIMESTAMPING_SYS_HARDWARE;
-				} else {
-					/*
-					 * PCAP_TSTAMP_ADAPTER_UNSYNCED - hardware
-					 * timestamp, not synchronized with the
-					 * system clock.
-					 */
-					timesource = SOF_TIMESTAMPING_RAW_HARDWARE;
-				}
-				if (setsockopt(handle->fds[k], SOL_PACKET, PACKET_TIMESTAMP,
-					(void *)&timesource, sizeof(timesource))) {
-					snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, 
-						"can't set PACKET_TIMESTAMP: %s", 
-						pcap_strerror(errno));
-					*status = PCAP_ERROR;
-					return -1;
-				}
+				timesource = SOF_TIMESTAMPING_RAW_HARDWARE;
+			}
+			if (setsockopt(handle->fds[k], SOL_PACKET, PACKET_TIMESTAMP,
+				(void *)&timesource, sizeof(timesource))) {
+				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, 
+					"can't set PACKET_TIMESTAMP: %s", 
+					pcap_strerror(errno));
+				*status = PCAP_ERROR;
+				return -1;
 			}
 		}
 	}
@@ -3900,77 +3928,73 @@ retry:
 	req.tp_feature_req_word = 0;
 #endif
 
-	for (k = 0; k < handle->mt; k++) {
-		if (setsockopt(handle->fds[k], SOL_PACKET, PACKET_RX_RING,
-						(void *) &req, sizeof(req))) {
-			if ((errno == ENOMEM) && (req.tp_block_nr > 1)) {
-				/*
-				 * Memory failure; try to reduce the requested ring
-				 * size.
-				 *
-				 * We used to reduce this by half -- do 5% instead.
-				 * That may result in more iterations and a longer
-				 * startup, but the user will be much happier with
-				 * the resulting buffer size.
-				 */
-				if (req.tp_frame_nr < 20)
-					req.tp_frame_nr -= 1;
-				else
-					req.tp_frame_nr -= req.tp_frame_nr/20;
-				goto retry;
-			}
-			if (errno == ENOPROTOOPT) {
-				/*
-				 * We don't have ring buffer support in this kernel.
-				 */
-				return 0;
-			}
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-			    "can't create rx ring on packet socket: %s",
-			    pcap_strerror(errno));
-			*status = PCAP_ERROR;
-			return -1;
+	if (setsockopt(handle->fds[k], SOL_PACKET, PACKET_RX_RING,
+					(void *) &req, sizeof(req))) {
+		if ((errno == ENOMEM) && (req.tp_block_nr > 1)) {
+			/*
+			 * Memory failure; try to reduce the requested ring
+			 * size.
+			 *
+			 * We used to reduce this by half -- do 5% instead.
+			 * That may result in more iterations and a longer
+			 * startup, but the user will be much happier with
+			 * the resulting buffer size.
+			 */
+			if (req.tp_frame_nr < 20)
+				req.tp_frame_nr -= 1;
+			else
+				req.tp_frame_nr -= req.tp_frame_nr/20;
+			goto retry;
 		}
-
-		/* memory map the rx ring */
-		handlep->mmapbuflen[k] = req.tp_block_nr * req.tp_block_size;
-		handlep->mmapbuf[k] = mmap(0, handlep->mmapbuflen[k],
-		    PROT_READ|PROT_WRITE, MAP_SHARED, handle->fds[k], 0);
-		if (handlep->mmapbuf[k] == MAP_FAILED) {
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-			    "can't mmap rx ring: %s", pcap_strerror(errno));
-    
-			/* clear the allocated ring on error*/
-			destroy_ring(handle);
-			*status = PCAP_ERROR;
-			return -1;
+		if (errno == ENOPROTOOPT) {
+			/*
+			 * We don't have ring buffer support in this kernel.
+			 */
+			return 0;
 		}
-    
-		/* allocate a ring for each frame header pointer*/
-		handle->cc_mt[k] = req.tp_frame_nr;
-		handle->buffer_mt[k] = malloc(handle->cc_mt[k] * sizeof(union thdr *));
-		handle->buffermap[handle->fds[handle->fdmap[k]]] = k;
-		if (!handle->buffer_mt[k]) {
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-			    "can't allocate ring of frame headers: %s",
-			    pcap_strerror(errno));
-    
-			destroy_ring(handle);
-			*status = PCAP_ERROR;
-			return -1;
-		}
-
-		/* fill the header ring with proper frame ptr*/
-		handle->offset = 0;
-		for (i=0; i<req.tp_block_nr; ++i) {
-			void *base = &handlep->mmapbuf[k][i*req.tp_block_size];
-			for (j=0; j<frames_per_block; ++j, ++handle->offset_mt[k]) {
-				RING_GET_FRAME_MT(handle, k) = base;
-				base += req.tp_frame_size;
-			}
-		}
+		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+		    "can't create rx ring on packet socket: %s",
+		    pcap_strerror(errno));
+		*status = PCAP_ERROR;
+		return -1;
 	}
 
+	/* memory map the rx ring */
+	handlep->mmapbuflen[k] = req.tp_block_nr * req.tp_block_size;
+	handlep->mmapbuf[k] = mmap(0, handlep->mmapbuflen[k],
+	    PROT_READ|PROT_WRITE, MAP_SHARED, handle->fds[k], 0);
+	if (handlep->mmapbuf[k] == MAP_FAILED) {
+		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+		    "can't mmap rx ring: %s", pcap_strerror(errno));
+    
+		/* clear the allocated ring on error*/
+		destroy_ring(handle);
+		*status = PCAP_ERROR;
+		return -1;
+	}
+    
+	/* allocate a ring for each frame header pointer*/
+	handle->cc_mt[k] = req.tp_frame_nr;
+	handle->buffer_mt[k] = malloc(handle->cc_mt[k] * sizeof(union thdr *));
+	if (!handle->buffer_mt[k]) {
+		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+		    "can't allocate ring of frame headers: %s",
+		    pcap_strerror(errno));
+    
+		destroy_ring(handle);
+		*status = PCAP_ERROR;
+		return -1;
+	}
+
+	/* fill the header ring with proper frame ptr*/
+	handle->offset_mt[k] = 0;
+	for (i=0; i<req.tp_block_nr; ++i) {
+		void *base = &handlep->mmapbuf[k][i*req.tp_block_size];
+		for (j=0; j<frames_per_block; ++j, ++handle->offset_mt[k]) {
+			RING_GET_FRAME_MT(handle, k) = base;
+			base += req.tp_frame_size;
+		}
+	}
 
 	handle->bufsize = req.tp_frame_size;
 	handle->offset = 0;
@@ -4440,15 +4464,35 @@ pcap_read_linux_mmap_v1(pcap_t *handle, int max_packets, pcap_handler callback,
 
 #ifdef HAVE_TPACKET2
 static int
+pcap_read_linux_mmap_v2_internal(pcap_t *handle, int max_packets, pcap_handler callback,
+		u_char *user, int k);
+static int
+pcap_read_linux_mmap_v2_mt(pcap_t *handle, int max_packets, pcap_handler callback,
+		u_char *user)
+{
+	pthread_t current = pthread_self();
+	int tid = GET_TID(current, 0x3f);
+
+	int k = handle->tidmap[tid];
+
+	return pcap_read_linux_mmap_v2_internal(handle, max_packets, callback, user, k);
+}
+static int
 pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 		u_char *user)
+{
+	pcap_read_linux_mmap_v2_internal(handle, max_packets, callback, user, 0);
+}
+static int
+pcap_read_linux_mmap_v2_internal(pcap_t *handle, int max_packets, pcap_handler callback,
+		u_char *user, int k)
 {
 	struct pcap_linux *handlep = handle->priv;
 	int pkts = 0;
 	int ret;
 
 	/* wait for frames availability.*/
-	ret = pcap_wait_for_frames_mmap(handle);
+	ret = pcap_wait_for_frames_mmap_mt(handle, k);
 	if (ret) {
 		return ret;
 	}
@@ -4458,7 +4502,7 @@ pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 	while ((pkts < max_packets) || PACKET_COUNT_IS_UNLIMITED(max_packets)) {
 		union thdr h;
 
-		h.raw = pcap_get_ring_frame(handle, TP_STATUS_USER, 0);
+		h.raw = pcap_get_ring_frame(handle, TP_STATUS_USER, k);
 		if (!h.raw)
 			break;
 
@@ -4478,10 +4522,10 @@ pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 				h.h2->tp_vlan_tci != 0,
 #endif
 				h.h2->tp_vlan_tci,
-				0);
+				k);
 		if (ret == 1) {
 			pkts++;
-			handlep->packets_read++;
+			__sync_fetch_and_add(&(handlep->packets_read), 1);
 		} else if (ret < 0) {
 			return ret;
 		}
@@ -4493,21 +4537,21 @@ pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 		 * the one we've just processed.
 		 */
 		h.h2->tp_status = TP_STATUS_KERNEL;
-		if (handlep->blocks_to_filter_in_userland > 0) {
-			handlep->blocks_to_filter_in_userland--;
-			if (handlep->blocks_to_filter_in_userland == 0) {
+		if (handlep->blocks_to_filter_in_userland_mt[k] > 0) {
+			handlep->blocks_to_filter_in_userland_mt[k]--;
+			if (handlep->blocks_to_filter_in_userland_mt[k] == 0) {
 				/*
 				 * No more blocks need to be filtered
 				 * in userland.
 				 */
-				handlep->filter_in_userland = 0;
+				handlep->filter_in_userland_mt[k] = 0;
 			}
 		}
 
 		/* next block */
 		/* Yeah we have to manually adjust the offset. Or return a copy of current offset. */
-		if (++handle->offset >= handle->cc)
-			handle->offset = 0;
+		if (++handle->offset_mt[k] >= handle->cc_mt[k])
+			handle->offset_mt[k] = 0;
 
 		/* check for break loop condition*/
 		if (handle->break_loop) {
@@ -4534,8 +4578,11 @@ static int
 pcap_read_linux_mmap_v3_mt(pcap_t *handle, int max_packets, pcap_handler callback,
 		u_char *user)
 {
-	int tid = pthread_self();
-	int k = handle->buffermap[handle->fds[handle->fdmap[tid]]];
+    pthread_t current = pthread_self();
+    int tid = GET_TID(current, 0x3f);
+
+	int k = handle->tidmap[tid];
+    printf("kkk %d\n", k);
 
 	return pcap_read_linux_mmap_v3_internal(handle, max_packets, callback,
 			user, k);
@@ -6063,7 +6110,7 @@ fix_offset(struct bpf_insn *p)
 }
 
 static int
-set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode)
+set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode, int k)
 {
 	int total_filter_on = 0;
 	int save_mode;
@@ -6101,7 +6148,8 @@ set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode)
 	 * the filtering done in userland even if it could have been
 	 * done in the kernel.
 	 */
-	if (setsockopt(handle->fd, SOL_SOCKET, SO_ATTACH_FILTER,
+	printf("now setting %d\n", handle->fds[k]);
+	if (setsockopt(handle->fds[k], SOL_SOCKET, SO_ATTACH_FILTER,
 		       &total_fcode, sizeof(total_fcode)) == 0) {
 		char drain[1];
 
@@ -6116,17 +6164,17 @@ set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode)
 		 * until we get an error (which is normally a
 		 * "nothing more to be read" error).
 		 */
-		save_mode = fcntl(handle->fd, F_GETFL, 0);
+		save_mode = fcntl(handle->fds[k], F_GETFL, 0);
 		if (save_mode != -1 &&
-		    fcntl(handle->fd, F_SETFL, save_mode | O_NONBLOCK) >= 0) {
-			while (recv(handle->fd, &drain, sizeof drain,
+		    fcntl(handle->fds[k], F_SETFL, save_mode | O_NONBLOCK) >= 0) {
+			while (recv(handle->fds[k], &drain, sizeof drain,
 			       MSG_TRUNC) >= 0)
 				;
 			save_errno = errno;
-			fcntl(handle->fd, F_SETFL, save_mode);
+			fcntl(handle->fds[k], F_SETFL, save_mode);
 			if (save_errno != EAGAIN) {
 				/* Fatal error */
-				reset_kernel_filter(handle);
+				reset_kernel_filter(handle, k);
 				snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 				 "recv: %s", pcap_strerror(save_errno));
 				return -2;
@@ -6137,7 +6185,7 @@ set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode)
 	/*
 	 * Now attach the new filter.
 	 */
-	ret = setsockopt(handle->fd, SOL_SOCKET, SO_ATTACH_FILTER,
+	ret = setsockopt(handle->fds[k], SOL_SOCKET, SO_ATTACH_FILTER,
 			 fcode, sizeof(*fcode));
 	if (ret == -1 && total_filter_on) {
 		/*
@@ -6157,7 +6205,7 @@ set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode)
 		 * we have the total filter on the socket,
 		 * and it won't come off.  What do we do then?
 		 */
-		reset_kernel_filter(handle);
+		reset_kernel_filter(handle, k);
 
 		errno = save_errno;
 	}
@@ -6165,7 +6213,7 @@ set_kernel_filter(pcap_t *handle, struct sock_fprog *fcode)
 }
 
 static int
-reset_kernel_filter(pcap_t *handle)
+reset_kernel_filter(pcap_t *handle, int k)
 {
 	/*
 	 * setsockopt() barfs unless it get a dummy parameter.
@@ -6175,7 +6223,7 @@ reset_kernel_filter(pcap_t *handle)
 	 */
 	int dummy = 0;
 
-	return setsockopt(handle->fd, SOL_SOCKET, SO_DETACH_FILTER,
+	return setsockopt(handle->fds[k], SOL_SOCKET, SO_DETACH_FILTER,
 				   &dummy, sizeof(dummy));
 }
 #endif

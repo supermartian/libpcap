@@ -274,6 +274,7 @@ typedef void (*pcap_handler)(u_char *, const struct pcap_pkthdr *,
 char	*pcap_lookupdev(char *);
 int	pcap_lookupnet(const char *, bpf_u_int32 *, bpf_u_int32 *, char *);
 
+void	pcap_set_mt(pcap_t *, int);
 pcap_t	*pcap_create(const char *, char *);
 int	pcap_set_snaplen(pcap_t *, int);
 int	pcap_set_promisc(pcap_t *, int);
