@@ -952,6 +952,7 @@ pcap_loop_mt(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 	cpu_set_t cpusets[64];
 	int cpun = sysconf(_SC_NPROCESSORS_ONLN);
 	pthread_attr_t attr;
+	p->mt = 4;
 
 	struct mt_arg args; /* This is shared between threads. */
 	args.p = p;

@@ -324,7 +324,7 @@ struct pcap_linux {
 /*
  * Prototypes for internal functions and methods.
  */
-static void map_arphrd_to_dlt(pcap_t *, int, int);
+static void map_arphrd_to_dlt(pcap_t *, int, int, int);
 #ifdef HAVE_PF_PACKET_SOCKETS
 static short int map_packet_type_to_sll_type(short int);
 #endif
@@ -355,7 +355,7 @@ union thdr {
 
 #ifdef HAVE_PACKET_RING
 #define RING_GET_FRAME(h) (((union thdr **)h->buffer)[h->offset])
-#define RING_GET_FRAME_MT(h, n) (((union thdr **)(h->buffer_mt[n]))[h->offset])
+#define RING_GET_FRAME_MT(h, n) (((union thdr **)(h->buffer_mt[n]))[h->offset_mt[n]])
 
 static void destroy_ring(pcap_t *handle);
 static int create_ring(pcap_t *handle, int *status, int k);
@@ -1507,6 +1507,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
     pthread_t current = pthread_self();
     tid = GET_TID(current, 0x3f);
 	int k = handle->sockfd2index[handle->tid2sockfd[tid]];
+	printf("reading k %d\n", k);
 	if (handle->mt > 1) {
 		current_fd = handle->fds[k];
 	} else {
@@ -1527,7 +1528,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 	 * if we're using a memory-mapped buffer, we won't even
 	 * get notified of "network down" events.
 	 */
-	bp = handle->buffer_mt[k] + handle->offset;
+	bp = handle->buffer_mt[k] + handle->offset_mt[k];
 
 #if defined(HAVE_PACKET_AUXDATA) && defined(HAVE_LINUX_TPACKET_AUXDATA_TP_VLAN_TCI)
 	msg.msg_name		= &from;
@@ -1566,6 +1567,7 @@ pcap_read_packet(pcap_t *handle, pcap_handler callback, u_char *userdata)
 			(struct sockaddr *) &from, &fromlen);
 #endif /* defined(HAVE_PACKET_AUXDATA) && defined(HAVE_LINUX_TPACKET_AUXDATA_TP_VLAN_TCI) */
 	} while (packet_len == -1 && errno == EINTR);
+	printf("packet_len %d\n", packet_len);
 
 	/* Check if an error occured */
 
@@ -2589,7 +2591,7 @@ map_packet_type_to_sll_type(short int sll_pkttype)
  *
  *  Sets the link type to -1 if unable to map the type.
  */
-static void map_arphrd_to_dlt(pcap_t *handle, int arptype, int cooked_ok)
+static void map_arphrd_to_dlt(pcap_t *handle, int arptype, int cooked_ok, int k)
 {
 	switch (arptype) {
 
@@ -2625,7 +2627,7 @@ static void map_arphrd_to_dlt(pcap_t *handle, int arptype, int cooked_ok)
 	case ARPHRD_METRICOM:
 	case ARPHRD_LOOPBACK:
 		handle->linktype = DLT_EN10MB;
-		handle->offset = 2;
+		handle->offset_mt[k] = 2;
 		break;
 
 	case ARPHRD_EETHER:
@@ -2656,7 +2658,7 @@ static void map_arphrd_to_dlt(pcap_t *handle, int arptype, int cooked_ok)
 	case ARPHRD_IEEE802_TR:
 	case ARPHRD_IEEE802:
 		handle->linktype = DLT_IEEE802;
-		handle->offset = 2;
+		handle->offset_mt[k] = 2;
 		break;
 
 	case ARPHRD_ARCNET:
@@ -2668,7 +2670,7 @@ static void map_arphrd_to_dlt(pcap_t *handle, int arptype, int cooked_ok)
 #endif
 	case ARPHRD_FDDI:
 		handle->linktype = DLT_FDDI;
-		handle->offset = 3;
+		handle->offset_mt[k] = 3;
 		break;
 
 #ifndef ARPHRD_ATM  /* FIXME: How to #include this? */
@@ -3083,7 +3085,9 @@ activate_new(pcap_t *handle)
 	 * Default value for offset to align link-layer payload
 	 * on a 4-byte boundary.
 	 */
-	handle->offset	 = 0;
+	for (i = 0; i < handle->mt; i++) {
+		handle->offset_mt[i]	 = 0;
+	}
 
 	/*
 	 * What kind of frames do we have to deal with? Fall back
@@ -3132,7 +3136,7 @@ activate_new(pcap_t *handle)
 			close_all_fds(handle);
 			return arptype;
 		}
-		map_arphrd_to_dlt(handle, arptype, 1);
+		map_arphrd_to_dlt(handle, arptype, 1, i);
 		if (handle->linktype == -1 ||
 		    handle->linktype == DLT_LINUX_SLL ||
 		    handle->linktype == DLT_LINUX_IRDA ||
@@ -3159,6 +3163,7 @@ activate_new(pcap_t *handle)
 				sock_fd = socket(PF_PACKET, SOCK_DGRAM,
 				    htons(ETH_P_ALL));
 				handle->fds[i] = sock_fd;
+				handle->sockfd2index[sock_fd] = i;
 				if (sock_fd == -1) {
 					snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 					    "socket: %s", pcap_strerror(errno));
@@ -3322,7 +3327,6 @@ activate_new(pcap_t *handle)
 		}
 		handle->offset_mt[i] += VLAN_TAG_LEN;
 	}
-	handle->offset += VLAN_TAG_LEN;
 #endif /* HAVE_PACKET_AUXDATA */
 
 	/*
@@ -3992,8 +3996,8 @@ retry:
 		return -1;
 	}
 
-	/* fill the header ring with proper frame ptr*/
 	handle->offset_mt[k] = 0;
+	/* fill the header ring with proper frame ptr*/
 	for (i=0; i<req.tp_block_nr; ++i) {
 		void *base = &handlep->mmapbuf[k][i*req.tp_block_size];
 		for (j=0; j<frames_per_block; ++j, ++handle->offset_mt[k]) {
@@ -4003,7 +4007,7 @@ retry:
 	}
 
 	handle->bufsize = req.tp_frame_size;
-	handle->offset = 0;
+	handle->offset_mt[k] = 0;
 	return 1;
 }
 
@@ -4152,6 +4156,7 @@ static int pcap_wait_for_frames_mmap(pcap_t *handle)
 
 static int pcap_wait_for_frames_mmap_mt(pcap_t *handle, int k)
 {
+	printf("reading k and error coming%d\n", k);
 	if (!pcap_get_ring_frame(handle, TP_STATUS_USER, k)) {
 		struct pcap_linux *handlep = handle->priv;
 		int timeout;
@@ -4249,6 +4254,7 @@ static int pcap_wait_for_frames_mmap_mt(pcap_t *handle, int k)
 					return PCAP_ERROR;
 				}
 			}
+
 			/* check for break loop condition on interrupted syscall*/
 			if (handle->break_loop) {
 				handle->break_loop = 0;
@@ -4608,6 +4614,7 @@ pcap_read_linux_mmap_v3_internal(pcap_t *handle, int max_packets, pcap_handler c
 			return ret;
 		}
 	}
+	printf("error coming\n");
 	h.raw = pcap_get_ring_frame(handle, TP_STATUS_USER, k);
 	if (!h.raw)
 		return pkts;
@@ -4615,7 +4622,7 @@ pcap_read_linux_mmap_v3_internal(pcap_t *handle, int max_packets, pcap_handler c
 	/* non-positive values of max_packets are used to require all
 	 * packets currently available in the ring */
 	while ((pkts < max_packets) || PACKET_COUNT_IS_UNLIMITED(max_packets)) {
-		if (handlep->current_packet == NULL) {
+		if (handlep->current_packet[k] == NULL) {
 			h.raw = pcap_get_ring_frame(handle, TP_STATUS_USER, k);
 			if (!h.raw)
 				break;
@@ -4629,8 +4636,9 @@ pcap_read_linux_mmap_v3_internal(pcap_t *handle, int max_packets, pcap_handler c
 			packets_to_read = max_packets;
 		}
 
+		printf("which k %d\n", k);
 		while(packets_to_read--) {
-			struct tpacket3_hdr* tp3_hdr = (struct tpacket3_hdr*) handlep->current_packet;
+			struct tpacket3_hdr* tp3_hdr = (struct tpacket3_hdr*) handlep->current_packet[k];
 			ret = pcap_handle_packet_mmap(
 					handle,
 					callback,
@@ -4739,6 +4747,7 @@ pcap_setfilter_linux_mmap(pcap_t *handle, struct bpf_program *filter)
 		for (n=0; n < handle->cc_mt[k]; ++n) {
 			if (--(handle->offset_mt[k]) < 0)
 				handle->offset_mt[k] = handle->cc_mt[k] - 1;
+		printf("yaya reading k and error coming%d\n", k);
 			if (!pcap_get_ring_frame(handle, TP_STATUS_KERNEL, k))
 				break;
 		}
@@ -5750,7 +5759,7 @@ activate_old(pcap_t *handle)
 	 * Try to find the DLT_ type corresponding to that
 	 * link-layer type.
 	 */
-	map_arphrd_to_dlt(handle, arptype, 0);
+	map_arphrd_to_dlt(handle, arptype, 0, 0);
 	if (handle->linktype == -1) {
 		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 			 "unknown arptype %d", arptype);
